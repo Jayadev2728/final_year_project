@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClassSentinel — Live Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:        #0E1218;
+    --surface:   #161C25;
+    --surface-2: #1C2430;
+    --border:    #262F3D;
+    --teal:      #4FD1C5;
+    --amber:     #F5A623;
+    --red:       #F2545B;
+    --green:     #4ADE80;
+    --text:      #E7ECF3;
+    --text-mute: #8996A8;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  *{ box-sizing:border-box; margin:0; padding:0; }
+
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-body);
+    min-height:100vh;
+    padding:28px clamp(16px, 4vw, 48px) 64px;
+  }
+
+  a{ color:inherit; }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header{
+    position:relative;
+    overflow:hidden;
+    background:linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:24px 28px;
+    margin-bottom:24px;
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+  }
+
+  header::after{
+    content:"";
+    position:absolute;
+    top:0; left:-40%;
+    width:40%; height:100%;
+    background:linear-gradient(90deg, transparent, rgba(79,209,197,0.08), transparent);
+    animation:scan 5s linear infinite;
+  }
+
+  @keyframes scan{
+    0%   { left:-40%; }
+    100% { left:100%; }
+  }
+
+  .brand{ position:relative; z-index:1; }
+  .eyebrow{
+    font-family:var(--font-mono);
+    font-size:11px;
+    letter-spacing:0.18em;
+    color:var(--teal);
+    text-transform:uppercase;
+    margin-bottom:6px;
+  }
+  h1{
+    font-family:var(--font-display);
+    font-size:clamp(22px, 3vw, 30px);
+    font-weight:700;
+    letter-spacing:-0.01em;
+  }
+
+  .status-cluster{
+    position:relative; z-index:1;
+    display:flex;
+    align-items:center;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+
+  .live-pill{
+    display:flex; align-items:center; gap:8px;
+    font-family:var(--font-mono);
+    font-size:12px;
+    letter-spacing:0.06em;
+    color:var(--text-mute);
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    padding:7px 12px;
+    border-radius:100px;
+  }
+  .dot{
+    width:8px; height:8px; border-radius:50%;
+    background:var(--text-mute);
+  }
+  .dot.on{
+    background:var(--green);
+    box-shadow:0 0 0 0 rgba(74,222,128,0.6);
+    animation:pulse 1.6s infinite;
+  }
+  @keyframes pulse{
+    0%   { box-shadow:0 0 0 0 rgba(74,222,128,0.55); }
+    70%  { box-shadow:0 0 0 8px rgba(74,222,128,0); }
+    100% { box-shadow:0 0 0 0 rgba(74,222,128,0); }
+  }
+
+  select{
+    font-family:var(--font-mono);
+    font-size:12px;
+    background:var(--surface-2);
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:8px 12px;
+    outline:none;
+  }
+
+  /* ── Summary cards ──────────────────────────────────── */
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+    gap:14px;
+    margin-bottom:24px;
+  }
+  .card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:18px 20px;
+  }
+  .card .label{
+    font-family:var(--font-mono);
+    font-size:11px;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color:var(--text-mute);
+    margin-bottom:10px;
+  }
+  .card .value{
+    font-family:var(--font-display);
+    font-size:32px;
+    font-weight:700;
+  }
+  .card.accent-teal  .value{ color:var(--teal); }
+  .card.accent-amber .value{ color:var(--amber); }
+  .card.accent-red   .value{ color:var(--red); }
+  .card.accent-green .value{ color:var(--green); }
+
+  /* ── Main grid ──────────────────────────────────────── */
+  .grid{
+    display:grid;
+    grid-template-columns:1.3fr 1fr;
+    gap:18px;
+  }
+  @media(max-width:900px){
+    .grid{ grid-template-columns:1fr; }
+  }
+
+  .panel{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:20px;
+    margin-bottom:18px;
+  }
+  .panel h2{
+    font-family:var(--font-display);
+    font-size:15px;
+    font-weight:600;
+    margin-bottom:14px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+  }
+  .panel h2 span.count{
+    font-family:var(--font-mono);
+    font-size:12px;
+    color:var(--text-mute);
+    font-weight:400;
+  }
+
+  table{ width:100%; border-collapse:collapse; }
+  th{
+    text-align:left;
+    font-family:var(--font-mono);
+    font-size:10px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-mute);
+    padding:8px 6px;
+    border-bottom:1px solid var(--border);
+  }
+  td{
+    font-size:13px;
+    padding:10px 6px;
+    border-bottom:1px solid rgba(38,47,61,0.5);
+    font-family:var(--font-mono);
+  }
+  tr:last-child td{ border-bottom:none; }
+  .status-tag{
+    font-family:var(--font-mono);
+    font-size:11px;
+    padding:2px 8px;
+    border-radius:100px;
+    display:inline-block;
+  }
+  .status-tag.ontime{ background:rgba(74,222,128,0.12); color:var(--green); }
+  .status-tag.late{ background:rgba(245,166,35,0.12); color:var(--amber); }
+
+  .empty{
+    color:var(--text-mute);
+    font-size:13px;
+    padding:24px 4px;
+    text-align:center;
+  }
+
+  .alert-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:9px 4px;
+    border-bottom:1px solid rgba(38,47,61,0.5);
+    font-size:13px;
+  }
+  .alert-row:last-child{ border-bottom:none; }
+  .alert-icon{
+    width:26px; height:26px;
+    border-radius:7px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:13px;
+    flex-shrink:0;
+  }
+  .alert-icon.phone{ background:rgba(242,84,91,0.14); }
+  .alert-icon.drowsy{ background:rgba(245,166,35,0.14); }
+  .alert-time{
+    font-family:var(--font-mono);
+    color:var(--text-mute);
+    margin-left:auto;
+    font-size:12px;
+  }
+
+  canvas{ max-height:220px; }
+
+  footer{
+    text-align:center;
+    color:var(--text-mute);
+    font-family:var(--font-mono);
+    font-size:11px;
+    margin-top:32px;
+    letter-spacing:0.05em;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="eyebrow">Classroom Monitoring System</div>
+    <h1>ClassSentinel</h1>
+  </div>
+  <div class="status-cluster">
+    <div class="live-pill"><span class="dot" id="liveDot"></span><span id="liveLabel">CONNECTING</span></div>
+    <select id="sessionSelect"></select>
+  </div>
+</header>
+
+<div class="cards">
+  <div class="card accent-teal">
+    <div class="label">Students Marked</div>
+    <div class="value" id="cardMarked">—</div>
+  </div>
+  <div class="card accent-red">
+    <div class="label">Phone Alerts</div>
+    <div class="value" id="cardPhone">—</div>
+  </div>
+  <div class="card accent-amber">
+    <div class="label">Drowsy Alerts</div>
+    <div class="value" id="cardDrowsy">—</div>
+  </div>
+  <div class="card accent-green">
+    <div class="label">Avg Engagement</div>
+    <div class="value" id="cardEngagement">—</div>
+  </div>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="panel">
+      <h2>Attendance Log <span class="count" id="attCount"></span></h2>
+      <div id="attendanceWrap"><div class="empty">No students marked yet.</div></div>
+    </div>
+    <div class="panel">
+      <h2>Engagement Over Time</h2>
+      <canvas id="engagementChart"></canvas>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>Recent Alerts</h2>
+      <div id="alertsWrap"><div class="empty">No alerts yet.</div></div>
+    </div>
+  </div>
+</div>
+
+<footer>ClassSentinel · Face Recognition + YOLOv8 + MediaPipe · Auto-refreshing every 4s</footer>
+
+<script>
+const API = ""; // same origin as Flask
+let currentSession = null;
+let chart = null;
+
+async function fetchJSON(url){
+  const res = await fetch(API + url);
+  if(!res.ok) throw new Error("Request failed: " + url);
+  return res.json();
+}
+
+async function loadSessions(){
+  try{
+    const sessions = await fetchJSON("/api/sessions");
+    const select = document.getElementById("sessionSelect");
+    const prevValue = select.value;
+    select.innerHTML = "";
+    if(sessions.length === 0){
+      select.innerHTML = "<option>No sessions yet</option>";
+      setLive(false);
+      return;
+    }
+    sessions.forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      const label = s.end_time ? `Session #${s.id} (ended ${s.end_time.split(" ")[1] || ""})` : `Session #${s.id} (live)`;
+      opt.textContent = label;
+      select.appendChild(opt);
+    });
+    // default to most recent session unless the user picked another one
+    select.value = prevValue && [...select.options].some(o => o.value === prevValue) ? prevValue : sessions[0].id;
+    currentSession = select.value;
+    setLive(sessions[0].end_time === null && select.value == sessions[0].id);
+  }catch(e){
+    setLive(false, true);
+  }
+}
+
+function setLive(isLive, errored){
+  const dot = document.getElementById("liveDot");
+  const label = document.getElementById("liveLabel");
+  if(errored){
+    dot.className = "dot";
+    label.textContent = "BACKEND OFFLINE";
+    return;
+  }
+  dot.className = isLive ? "dot on" : "dot";
+  label.textContent = isLive ? "LIVE" : "SESSION ENDED";
+}
+
+function statusTag(status){
+  const cls = status === "Late" ? "late" : "ontime";
+  return `<span class="status-tag ${cls}">${status}</span>`;
+}
+
+async function refreshDashboard(){
+  if(!currentSession) return;
+
+  try{
+    const [summary, attendance, alerts, engagement] = await Promise.all([
+      fetchJSON(`/api/summary/${currentSession}`),
+      fetchJSON(`/api/attendance/${currentSession}`),
+      fetchJSON(`/api/alerts/${currentSession}`),
+      fetchJSON(`/api/engagement/${currentSession}`)
+    ]);
+
+    document.getElementById("cardMarked").textContent = summary.total_marked;
+    document.getElementById("cardPhone").textContent = summary.phone_alerts;
+    document.getElementById("cardDrowsy").textContent = summary.drowsy_alerts;
+    document.getElementById("cardEngagement").textContent = summary.avg_engagement + "%";
+
+    // Attendance table
+    document.getElementById("attCount").textContent = attendance.length ? `${attendance.length} present` : "";
+    const attWrap = document.getElementById("attendanceWrap");
+    if(attendance.length === 0){
+      attWrap.innerHTML = `<div class="empty">No students marked yet.</div>`;
+    }else{
+      let rows = attendance.map(a => `
+        <tr>
+          <td>${a.student_id}</td>
+          <td>${a.student_name}</td>
+          <td>${a.time}</td>
+          <td>${statusTag(a.status)}</td>
+        </tr>`).join("");
+      attWrap.innerHTML = `
+        <table>
+          <thead><tr><th>ID</th><th>Name</th><th>Time</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    // Alerts feed (merged, most recent first)
+    const merged = [
+      ...alerts.phone.map(a => ({...a, type:"phone"})),
+      ...alerts.drowsy.map(a => ({...a, type:"drowsy"}))
+    ].sort((a,b) => (a.time < b.time ? 1 : -1)).slice(0, 20);
+
+    const alertsWrap = document.getElementById("alertsWrap");
+    if(merged.length === 0){
+      alertsWrap.innerHTML = `<div class="empty">No alerts yet.</div>`;
+    }else{
+      alertsWrap.innerHTML = merged.map(a => `
+        <div class="alert-row">
+          <div class="alert-icon ${a.type}">${a.type === "phone" ? "📵" : "😴"}</div>
+          <div>${a.type === "phone" ? "Phone detected" : "Drowsiness detected"}</div>
+          <div class="alert-time">${a.time}</div>
+        </div>`).join("");
+    }
+
+    // Engagement chart
+    const labels = engagement.map(e => e.time);
+    const scores = engagement.map(e => e.score);
+    if(!chart){
+      const ctx = document.getElementById("engagementChart").getContext("2d");
+      chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [{
+            data: scores,
+            borderColor: "#4FD1C5",
+            backgroundColor: "rgba(79,209,197,0.12)",
+            fill: true,
+            tension: 0.35,
+            pointRadius: 0,
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: "#8996A8", font: { family: "JetBrains Mono", size: 10 }, maxTicksLimit: 6 }, grid: { color: "#262F3D" } },
+            y: { min: 0, max: 100, ticks: { color: "#8996A8", font: { family: "JetBrains Mono", size: 10 } }, grid: { color: "#262F3D" } }
+          }
+        }
+      });
+    }else{
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = scores;
+      chart.update();
+    }
+
+    setLive(true);
+  }catch(e){
+    setLive(false, true);
+  }
+}
+
+document.getElementById("sessionSelect").addEventListener("change", (e) => {
+  currentSession = e.target.value;
+  chart = null; // rebuild chart for the newly selected session
+  refreshDashboard();
+});
+
+async function tick(){
+  await loadSessions();
+  await refreshDashboard();
+}
+
+tick();
+setInterval(tick, 4000);
+</script>
+
+</body>
+</html>
