@@ -71,6 +71,36 @@ folder_by_norm_id, folder_by_norm_name = {}, {}   # for duplicate detection
 
 face_detector = cv2.CascadeClassifier(config.get_cascade_path())
 
+def detect_faces(gray_frame):
+    """Haar cascade with confidence-based NMS suppression. Plain
+    detectMultiScale can return multiple overlapping windows for the same
+    face, or low-confidence 'ghost' detections on textured backgrounds
+    (patterned curtains/walls) — this uses detectMultiScale3's per-window
+    confidence weights plus cv2.dnn.NMSBoxes to collapse duplicates and
+    optionally drop weak detections, without needing any new dependency."""
+    boxes, _reject_levels, level_weights = face_detector.detectMultiScale3(
+        gray_frame,
+        scaleFactor=config.FACE_SCALE_FACTOR,
+        minNeighbors=config.FACE_MIN_NEIGHBORS,
+        minSize=config.FACE_MIN_SIZE,
+        outputRejectLevels=True
+    )
+    if len(boxes) == 0:
+        return []
+    scores = [float(w) for w in level_weights]
+    if config.DEBUG_PRINT_CONFIDENCE:
+        print(f"Face detection scores this frame: {[round(s,2) for s in scores]}")
+    indices = cv2.dnn.NMSBoxes(
+        bboxes=[list(map(int, b)) for b in boxes],
+        scores=scores,
+        score_threshold=config.FACE_MIN_CONFIDENCE_SCORE,
+        nms_threshold=config.FACE_NMS_IOU_THRESHOLD
+    )
+    if len(indices) == 0:
+        return []
+    indices = indices.flatten() if hasattr(indices, "flatten") else [i[0] for i in indices]
+    return [tuple(boxes[i]) for i in indices]
+
 if not os.path.isdir(config.STUDENT_PHOTOS_DIR):
     print(f"'{config.STUDENT_PHOTOS_DIR}' folder not found. Enroll students first with enroll_student.py")
     raise SystemExit
@@ -108,7 +138,7 @@ for student_folder in os.listdir(config.STUDENT_PHOTOS_DIR):
         if img is None:
             continue
         gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_detector.detectMultiScale(gray, 1.1, 5)
+        faces = detect_faces(gray)
         for (x, y, w_f, h_f) in faces:
             face_roi = cv2.resize(gray[y:y+h_f, x:x+w_f], (200, 200))
             known_faces.append(face_roi)
@@ -140,10 +170,13 @@ print("All models loaded. Starting system...")
 
 # ── Tracking variables ────────────────────────────────────────
 already_marked_this_run = {}
-frame_counter = 0
+last_seen_write = {}          # student_id -> datetime, throttles session_presence updates
+drowsy_state = {}             # key (student_id or "unidentified") -> {"start": datetime|None, "streak": int}
+last_drowsy_log_by_key = {}   # key -> datetime, per-person throttle for drowsy alert logging
+last_phone_log_by_key  = {}   # key -> datetime, per-person throttle for phone alert logging
 yolo_frame_count = 0
 last_yolo_results = None
-last_phone_log = last_drowsy_log = last_engage_log = None
+last_engage_log = None
 session_start = datetime.now()
 
 # ── Attendance ────────────────────────────────────────────────
@@ -163,6 +196,15 @@ def mark_attendance(student_id, student_name):
     if inserted:
         already_marked_this_run[student_id] = True
         print(f"Marked: {student_name} - {status}")
+
+def mark_seen(student_id, student_name):
+    """Records 'present in this session' regardless of the once-a-day
+    attendance dedup — throttled to avoid a DB write every single frame."""
+    student_id = db.normalize_id(student_id)
+    now = datetime.now()
+    if student_id not in last_seen_write or (now - last_seen_write[student_id]).seconds >= 5:
+        db.mark_seen(session_id, student_id, student_name)
+        last_seen_write[student_id] = now
 
 # ── Engagement Score ──────────────────────────────────────────
 def calculate_engagement(face_present, phone_detected, drowsy):
@@ -184,6 +226,16 @@ def open_camera():
     return cv2.VideoCapture(config.CAMERA_SOURCE)
 
 cap = open_camera()
+if not cap.isOpened():
+    print(f"\nERROR: Could not open camera at CAMERA_SOURCE={config.CAMERA_SOURCE}.")
+    print("This usually means one of:")
+    print(f"  - No camera exists at index {config.CAMERA_SOURCE} on this machine right now")
+    print("    (Iriun's index can change between reconnects — run camera.py to recheck)")
+    print("  - Another app is currently using the camera")
+    print("  - Antivirus/Windows privacy settings are blocking camera access")
+    print("Run 'python camera.py' to find the correct index, then update CAMERA_SOURCE in config.py.")
+    db.end_session(session_id)
+    raise SystemExit(1)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 print("ClassSentinel running... Press Q to quit and generate report.")
 
@@ -195,7 +247,7 @@ while True:
     if not ret:
         consecutive_failures += 1
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            print("Camera feed lost. Ending session.")
+            print("Camera feed lost mid-session (dropped connection). Ending session.")
             break
         time.sleep(0.05)
         continue
@@ -207,7 +259,8 @@ while True:
     now = datetime.now()
 
     # ── Attendance ────────────────────────────────────────────
-    faces = face_detector.detectMultiScale(gray_frame, config.FACE_SCALE_FACTOR, 5, minSize=config.FACE_MIN_SIZE)
+    faces = detect_faces(gray_frame)
+    recognized_faces_this_frame = []   # [{name, id, cx, cy}] — used below to attribute phone/drowsy events
     for (x, y, fw, fh) in faces:
         face_roi = cv2.resize(gray_frame[y:y+fh, x:x+fw], (200, 200))
         label, confidence = recognizer.predict(face_roi)
@@ -218,13 +271,19 @@ while True:
             uid = known_ids[known_names.index(name)]
             color = (0, 255, 0)
             mark_attendance(uid, name)
+            mark_seen(uid, name)
+            recognized_faces_this_frame.append({
+                "name": name, "id": uid,
+                "cx": x + fw / 2, "cy": y + fh / 2
+            })
         else:
             name, color = "Unknown", (0, 0, 255)
         cv2.rectangle(frame, (x, y), (x+fw, y+fh), color, 2)
         cv2.putText(frame, name, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-    # ── Drowsiness ────────────────────────────────────────────
+    # ── Drowsiness (per-student attribution) ───────────────────
     drowsy = False
+    drowsy_names_this_frame = []
     face_present = len(faces) > 0
 
     if face_mesh is not None:
@@ -236,17 +295,47 @@ while True:
                 try:
                     avg_ear = (calculate_EAR(LEFT_EYE, landmarks, w, h) +
                                calculate_EAR(RIGHT_EYE, landmarks, w, h)) / 2.0
-                    cv2.putText(frame, f"EAR:{round(avg_ear,2)}", (w-120, 40),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+
+                    # Match this MediaPipe landmark set to a recognized face (nose tip
+                    # as a stable anchor point), so we know WHO these eyes belong to
+                    nose = landmarks[1]
+                    fx, fy = nose.x * w, nose.y * h
+                    matched_name, matched_id, best_distance = None, None, None
+                    for f in recognized_faces_this_frame:
+                        dist = ((f["cx"] - fx) ** 2 + (f["cy"] - fy) ** 2) ** 0.5
+                        if best_distance is None or dist < best_distance:
+                            best_distance, matched_name, matched_id = dist, f["name"], f["id"]
+                    max_distance = w * config.FACE_MATCH_MAX_DISTANCE_RATIO
+                    if best_distance is None or best_distance > max_distance:
+                        matched_name, matched_id = None, None
+
+                    key = matched_id if matched_id else "unidentified"
+
+                    cv2.putText(frame, f"EAR:{round(avg_ear,2)}", (max(0, int(fx)-40), max(20, int(fy)-30)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 2)
+                    if config.DEBUG_PRINT_EAR:
+                        who = matched_name or "unidentified"
+                        print(f"EAR: {round(avg_ear, 3)}  ({who})  threshold {config.EAR_THRESHOLD}")
+
+                    state = drowsy_state.setdefault(key, {"start": None, "streak": 0})
                     if avg_ear < config.EAR_THRESHOLD:
-                        frame_counter += 1
-                        if frame_counter >= config.DROWSY_FRAMES:
+                        state["streak"] = 0
+                        if state["start"] is None:
+                            state["start"] = now
+                        elapsed = (now - state["start"]).total_seconds()
+                        if elapsed >= config.DROWSY_SECONDS:
                             drowsy = True
-                            if last_drowsy_log is None or (now - last_drowsy_log).seconds >= 5:
-                                db.log_drowsy_alert(session_id)
-                                last_drowsy_log = now
+                            drowsy_names_this_frame.append(matched_name or "Unidentified")
+                            last_log = last_drowsy_log_by_key.get(key)
+                            if last_log is None or (now - last_log).seconds >= 5:
+                                db.log_drowsy_alert(session_id, matched_id, matched_name)
+                                last_drowsy_log_by_key[key] = now
                     else:
-                        frame_counter = 0
+                        state["streak"] += 1
+                        if state["streak"] >= config.EAR_RESET_TOLERANCE_FRAMES:
+                            state["start"] = None
+                            state["streak"] = 0
+
                     for idx in LEFT_EYE + RIGHT_EYE:
                         cv2.circle(frame, (int(landmarks[idx].x*w), int(landmarks[idx].y*h)), 2, (255,255,0), -1)
                 except Exception:
@@ -266,10 +355,28 @@ while True:
                     phone_detected = True
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     cv2.rectangle(frame, (x1,y1), (x2,y2), (0,0,255), 2)
-                    cv2.putText(frame, "PHONE", (x1, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-                    if last_phone_log is None or (now - last_phone_log).seconds >= 5:
-                        db.log_phone_alert(session_id)
-                        last_phone_log = now
+
+                    # Attribute to the nearest recognized face, if one is close enough
+                    phone_cx, phone_cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    attributed_name, attributed_id = None, None
+                    best_distance = None
+                    for f in recognized_faces_this_frame:
+                        dist = ((f["cx"] - phone_cx) ** 2 + (f["cy"] - phone_cy) ** 2) ** 0.5
+                        if best_distance is None or dist < best_distance:
+                            best_distance = dist
+                            attributed_name, attributed_id = f["name"], f["id"]
+                    max_distance = w * config.FACE_MATCH_MAX_DISTANCE_RATIO
+                    if best_distance is None or best_distance > max_distance:
+                        attributed_name, attributed_id = None, None
+
+                    label_text = f"PHONE - {attributed_name}" if attributed_name else "PHONE - Unidentified"
+                    cv2.putText(frame, label_text, (x1, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+
+                    phone_key = attributed_id if attributed_id else "unidentified"
+                    last_log = last_phone_log_by_key.get(phone_key)
+                    if last_log is None or (now - last_log).seconds >= 5:
+                        db.log_phone_alert(session_id, attributed_id, attributed_name)
+                        last_phone_log_by_key[phone_key] = now
 
     # ── Engagement + UI ────────────────────────────────────────
     score = calculate_engagement(face_present, phone_detected, drowsy)
@@ -287,13 +394,27 @@ while True:
     cv2.putText(frame, f"Drowsy : {'YES' if drowsy else 'NO'}", (20,100), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                 (0,0,255) if drowsy else (0,255,0), 2)
     if drowsy:
-        cv2.putText(frame, "DROWSY ALERT!", (20,135), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+        cv2.putText(frame, f"DROWSY: {', '.join(sorted(set(drowsy_names_this_frame)))}", (20,135),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 3)
     if phone_detected:
         cv2.putText(frame, "PHONE DETECTED!", (20,170), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+
+    if config.SESSION_DURATION_MINUTES is not None:
+        remaining = max(0, config.SESSION_DURATION_MINUTES - (now - session_start).total_seconds() / 60)
+        mins, secs = int(remaining), int((remaining % 1) * 60)
+        cv2.putText(frame, f"Time left: {mins:02d}:{secs:02d}", (w - 220, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
     cv2.imshow("ClassSentinel", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+    # ── Auto-stop after the configured duration ────────────────
+    if config.SESSION_DURATION_MINUTES is not None:
+        elapsed_minutes = (now - session_start).total_seconds() / 60
+        if elapsed_minutes >= config.SESSION_DURATION_MINUTES:
+            print(f"\nSession duration ({config.SESSION_DURATION_MINUTES} min) reached. Ending session.")
+            break
 
 cap.release()
 cv2.destroyAllWindows()
