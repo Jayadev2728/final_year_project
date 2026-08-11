@@ -79,7 +79,7 @@ def main():
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_detector.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+        faces = face_detector.detectMultiScale(gray, config.FACE_SCALE_FACTOR, config.FACE_MIN_NEIGHBORS, minSize=(80, 80))
 
         display = frame.copy()
         for (x, y, w, h) in faces:
