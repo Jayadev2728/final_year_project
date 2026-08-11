@@ -53,7 +53,7 @@ for student_folder in sorted(os.listdir(student_photos_dir)):
         if img is None:
             continue
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_detector.detectMultiScale(gray, 1.1, 5)
+        faces = face_detector.detectMultiScale(gray, config.FACE_SCALE_FACTOR, config.FACE_MIN_NEIGHBORS)
         if len(faces) > 0:
             faces_found += 1
 
