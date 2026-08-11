@@ -14,12 +14,14 @@ The dashboard polls these endpoints every few seconds to stay live.
 
 import os
 import sys
-from flask import Flask, jsonify, send_from_directory
+import tempfile
+from flask import Flask, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 
 # Allow "import database" to work when this file is run from backend/
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database as db
+from report_generator import generate_report_pdf
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 
@@ -52,6 +54,11 @@ def api_attendance(session_id):
     return jsonify(db.get_attendance(session_id))
 
 
+@app.route("/api/student-summary/<int:session_id>")
+def api_student_summary(session_id):
+    return jsonify(db.get_student_summary(session_id))
+
+
 # ── Alerts ───────────────────────────────────────────────────────
 @app.route("/api/alerts/<int:session_id>")
 def api_alerts(session_id):
@@ -71,6 +78,22 @@ def api_engagement(session_id):
 @app.route("/api/summary/<int:session_id>")
 def api_summary(session_id):
     return jsonify(db.get_summary(session_id))
+
+
+# ── PDF report ───────────────────────────────────────────────────
+@app.route("/api/report/<int:session_id>/pdf")
+def api_report_pdf(session_id):
+    session = db.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        output_path = tmp.name
+    generate_report_pdf(session_id, output_path)
+
+    date_part = session["start_time"].split(" ")[0]
+    filename = f"ClassSentinel_Session{session_id}_{date_part}.pdf"
+    return send_file(output_path, mimetype="application/pdf", as_attachment=True, download_name=filename)
 
 
 if __name__ == "__main__":

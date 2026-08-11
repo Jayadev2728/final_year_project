@@ -127,6 +127,26 @@
     outline:none;
   }
 
+  .dl-btn{
+    display:flex; align-items:center; gap:6px;
+    font-family:var(--font-mono);
+    font-size:12px;
+    background:var(--teal);
+    color:#0E1218;
+    border:none;
+    border-radius:8px;
+    padding:8px 14px;
+    font-weight:600;
+    cursor:pointer;
+    transition:opacity 0.15s;
+  }
+  .dl-btn:hover{ opacity:0.85; }
+  .dl-btn:disabled{
+    background:var(--surface-2);
+    color:var(--text-mute);
+    cursor:not-allowed;
+  }
+
   /* ── Summary cards ──────────────────────────────────── */
   .cards{
     display:grid;
@@ -218,6 +238,7 @@
   }
   .status-tag.ontime{ background:rgba(74,222,128,0.12); color:var(--green); }
   .status-tag.late{ background:rgba(245,166,35,0.12); color:var(--amber); }
+  .status-tag.notmarked{ background:rgba(137,150,168,0.12); color:var(--text-mute); }
 
   .empty{
     color:var(--text-mute);
@@ -273,12 +294,13 @@
   <div class="status-cluster">
     <div class="live-pill"><span class="dot" id="liveDot"></span><span id="liveLabel">CONNECTING</span></div>
     <select id="sessionSelect"></select>
+    <button class="dl-btn" id="downloadBtn" onclick="downloadReport()">⬇ Download Report</button>
   </div>
 </header>
 
 <div class="cards">
   <div class="card accent-teal">
-    <div class="label">Students Marked</div>
+    <div class="label">Students Present</div>
     <div class="value" id="cardMarked">—</div>
   </div>
   <div class="card accent-red">
@@ -298,8 +320,8 @@
 <div class="grid">
   <div>
     <div class="panel">
-      <h2>Attendance Log <span class="count" id="attCount"></span></h2>
-      <div id="attendanceWrap"><div class="empty">No students marked yet.</div></div>
+      <h2>Student Summary <span class="count" id="attCount"></span></h2>
+      <div id="attendanceWrap"><div class="empty">No students detected yet.</div></div>
     </div>
     <div class="panel">
       <h2>Engagement Over Time</h2>
@@ -368,7 +390,7 @@ function setLive(isLive, errored){
 }
 
 function statusTag(status){
-  const cls = status === "Late" ? "late" : "ontime";
+  const cls = status === "Late" ? "late" : status === "On Time" ? "ontime" : "notmarked";
   return `<span class="status-tag ${cls}">${status}</span>`;
 }
 
@@ -376,9 +398,9 @@ async function refreshDashboard(){
   if(!currentSession) return;
 
   try{
-    const [summary, attendance, alerts, engagement] = await Promise.all([
+    const [summary, students, alerts, engagement] = await Promise.all([
       fetchJSON(`/api/summary/${currentSession}`),
-      fetchJSON(`/api/attendance/${currentSession}`),
+      fetchJSON(`/api/student-summary/${currentSession}`),
       fetchJSON(`/api/alerts/${currentSession}`),
       fetchJSON(`/api/engagement/${currentSession}`)
     ]);
@@ -388,22 +410,25 @@ async function refreshDashboard(){
     document.getElementById("cardDrowsy").textContent = summary.drowsy_alerts;
     document.getElementById("cardEngagement").textContent = summary.avg_engagement + "%";
 
-    // Attendance table
-    document.getElementById("attCount").textContent = attendance.length ? `${attendance.length} present` : "";
+    // Unified student summary table
+    document.getElementById("attCount").textContent = students.length ? `${students.length} present` : "";
     const attWrap = document.getElementById("attendanceWrap");
-    if(attendance.length === 0){
-      attWrap.innerHTML = `<div class="empty">No students marked yet.</div>`;
+    if(students.length === 0){
+      attWrap.innerHTML = `<div class="empty">No students detected yet.</div>`;
     }else{
-      let rows = attendance.map(a => `
+      let rows = students.map(s => `
         <tr>
-          <td>${a.student_id}</td>
-          <td>${a.student_name}</td>
-          <td>${a.time}</td>
-          <td>${statusTag(a.status)}</td>
+          <td>${s.student_id}</td>
+          <td>${s.student_name}</td>
+          <td>${statusTag(s.attendance)}</td>
+          <td>${s.first_seen}</td>
+          <td>${s.phone_alerts}</td>
+          <td>${s.drowsy_alerts}</td>
+          <td>${s.engagement}%</td>
         </tr>`).join("");
       attWrap.innerHTML = `
         <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Time</th><th>Status</th></tr></thead>
+          <thead><tr><th>ID</th><th>Name</th><th>Attend.</th><th>First Seen</th><th>📵</th><th>😴</th><th>Engage.</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
     }
@@ -421,7 +446,7 @@ async function refreshDashboard(){
       alertsWrap.innerHTML = merged.map(a => `
         <div class="alert-row">
           <div class="alert-icon ${a.type}">${a.type === "phone" ? "📵" : "😴"}</div>
-          <div>${a.type === "phone" ? "Phone detected" : "Drowsiness detected"}</div>
+          <div>${a.type === "phone" ? `Phone detected${a.student_name ? " — " + a.student_name : " (unidentified)"}` : "Drowsiness detected"}</div>
           <div class="alert-time">${a.time}</div>
         </div>`).join("");
     }
@@ -471,6 +496,11 @@ document.getElementById("sessionSelect").addEventListener("change", (e) => {
   chart = null; // rebuild chart for the newly selected session
   refreshDashboard();
 });
+
+function downloadReport(){
+  if(!currentSession) return;
+  window.location.href = `/api/report/${currentSession}/pdf`;
+}
 
 async function tick(){
   await loadSessions();
