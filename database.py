@@ -86,7 +86,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS phone_alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL,
-                time TEXT NOT NULL
+                time TEXT NOT NULL,
+                student_id TEXT,
+                student_name TEXT
             )
         """)
         cur.execute("""
@@ -104,6 +106,32 @@ def init_db():
                 score INTEGER NOT NULL
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS session_presence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                student_id TEXT NOT NULL,
+                student_name TEXT NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                UNIQUE(session_id, student_id)
+            )
+        """)
+    _migrate_add_column("phone_alerts", "student_id", "TEXT")
+    _migrate_add_column("phone_alerts", "student_name", "TEXT")
+    _migrate_add_column("drowsy_alerts", "student_id", "TEXT")
+    _migrate_add_column("drowsy_alerts", "student_name", "TEXT")
+
+
+def _migrate_add_column(table, column, coltype):
+    """Adds a column to an existing table if it's not already there. Needed
+    because init_db()'s CREATE TABLE IF NOT EXISTS won't add new columns to
+    a database file created by an older version of this schema."""
+    with db_cursor() as cur:
+        cur.execute(f"PRAGMA table_info({table})")
+        existing_columns = [row["name"] for row in cur.fetchall()]
+        if column not in existing_columns:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
 # ── Sessions ─────────────────────────────────────────────────────
@@ -197,20 +225,72 @@ def get_attendance(session_id):
         return [dict(r) for r in cur.fetchall()]
 
 
-# ── Alerts ───────────────────────────────────────────────────────
-def log_phone_alert(session_id):
+def get_todays_attendance_status(student_id):
+    """Looks up a student's official attendance status for TODAY, regardless
+    of which session actually recorded it. This is what lets a later
+    session's report correctly show someone as 'Late'/'On Time' even though
+    same-day dedup meant THIS session didn't write a new attendance row for
+    them — they were already marked earlier today."""
+    student_id = normalize_id(student_id)
+    today = datetime.now().strftime("%Y-%m-%d")
     with db_cursor() as cur:
         cur.execute(
-            "INSERT INTO phone_alerts (session_id, time) VALUES (?, ?)",
-            (session_id, datetime.now().strftime("%H:%M:%S"))
+            "SELECT * FROM attendance WHERE student_id = ? AND date = ? LIMIT 1",
+            (student_id, today)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+# ── Session presence (separate from once-a-day attendance) ─────────
+def mark_seen(session_id, student_id, student_name):
+    """Upserts a 'this student was seen in this session' record — separate
+    from mark_attendance's once-a-day dedup. This is what a session's
+    report/dashboard uses to show 'who was actually present', since the
+    attendance table deliberately won't write a new row for someone
+    already marked earlier the same day."""
+    student_id   = normalize_id(student_id)
+    student_name = normalize_name(student_name)
+    now = datetime.now().strftime("%H:%M:%S")
+    with db_cursor() as cur:
+        cur.execute(
+            """INSERT INTO session_presence (session_id, student_id, student_name, first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, student_id) DO UPDATE SET last_seen = excluded.last_seen""",
+            (session_id, student_id, student_name, now, now)
         )
 
 
-def log_drowsy_alert(session_id):
+def get_session_presence(session_id):
     with db_cursor() as cur:
         cur.execute(
-            "INSERT INTO drowsy_alerts (session_id, time) VALUES (?, ?)",
-            (session_id, datetime.now().strftime("%H:%M:%S"))
+            "SELECT * FROM session_presence WHERE session_id = ? ORDER BY first_seen",
+            (session_id,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ── Alerts ───────────────────────────────────────────────────────
+def log_phone_alert(session_id, student_id=None, student_name=None):
+    """student_id/student_name are the closest recognized face to the phone
+    at detection time (best-effort proximity match, not guaranteed correct
+    if multiple people are close together) — pass None/None if no
+    recognized face was near enough to attribute confidently."""
+    with db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO phone_alerts (session_id, time, student_id, student_name) VALUES (?, ?, ?, ?)",
+            (session_id, datetime.now().strftime("%H:%M:%S"), student_id, student_name)
+        )
+
+
+def log_drowsy_alert(session_id, student_id=None, student_name=None):
+    """student_id/student_name are the closest recognized face to the
+    drowsy landmark set at detection time — None/None if no recognized
+    face was near enough to attribute confidently."""
+    with db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO drowsy_alerts (session_id, time, student_id, student_name) VALUES (?, ?, ?, ?)",
+            (session_id, datetime.now().strftime("%H:%M:%S"), student_id, student_name)
         )
 
 
@@ -230,6 +310,55 @@ def get_drowsy_alerts(session_id, limit=50):
             (session_id, limit)
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_phone_alert_count(session_id, student_id):
+    student_id = normalize_id(student_id)
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) as c FROM phone_alerts WHERE session_id = ? AND student_id = ?",
+            (session_id, student_id)
+        )
+        return cur.fetchone()["c"]
+
+
+def get_drowsy_alert_count(session_id, student_id):
+    student_id = normalize_id(student_id)
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) as c FROM drowsy_alerts WHERE session_id = ? AND student_id = ?",
+            (session_id, student_id)
+        )
+        return cur.fetchone()["c"]
+
+
+def get_student_summary(session_id):
+    """THE unified per-student table: one row per student actually present
+    in this session, combining attendance status, phone alerts, drowsy
+    alerts, and a derived engagement score. This is what the report and
+    dashboard show instead of several disconnected tables."""
+    import config
+    presence = get_session_presence(session_id)
+    rows = []
+    for p in presence:
+        sid, sname  = p["student_id"], p["student_name"]
+        attendance  = get_todays_attendance_status(sid)
+        status      = attendance["status"] if attendance else "Not marked"
+        phone_count  = get_phone_alert_count(session_id, sid)
+        drowsy_count = get_drowsy_alert_count(session_id, sid)
+        engagement   = max(0, 100 - phone_count * config.PHONE_ALERT_PENALTY
+                                    - drowsy_count * config.DROWSY_ALERT_PENALTY)
+        rows.append({
+            "student_id":    sid,
+            "student_name":  sname,
+            "attendance":    status,
+            "first_seen":    p["first_seen"],
+            "last_seen":     p["last_seen"],
+            "phone_alerts":  phone_count,
+            "drowsy_alerts": drowsy_count,
+            "engagement":    engagement
+        })
+    return rows
 
 
 # ── Engagement ───────────────────────────────────────────────────
@@ -268,13 +397,13 @@ def export_attendance_csv(session_id, path="attendance.csv"):
 
 # ── Summary (used for the dashboard's top cards) ───────────────────
 def get_summary(session_id):
-    attendance = get_attendance(session_id)
+    presence   = get_session_presence(session_id)
     phone      = get_phone_alerts(session_id, limit=100000)
     drowsy     = get_drowsy_alerts(session_id, limit=100000)
     engagement = get_engagement_log(session_id)
     avg_score  = round(sum(e["score"] for e in engagement) / len(engagement), 1) if engagement else 0
     return {
-        "total_marked":   len(attendance),
+        "total_marked":   len(presence),
         "phone_alerts":   len(phone),
         "drowsy_alerts":  len(drowsy),
         "avg_engagement": avg_score
